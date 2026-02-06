@@ -1,0 +1,111 @@
+name: Java CI with SonarQube & Email Alerts
+
+on:
+  push:
+    branches:
+      - feature
+      - feature/**
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup Java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Build & Test
+      - name: Run Tests
+        id: tests
+        run: mvn clean test
+
+      # Email if tests fail
+      - name: Email on Test Failure
+        if: always() && steps.tests.outcome == 'failure'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.ALERT_EMAIL_FROM }}
+          to: ${{ secrets.ALERT_EMAIL_TO }}
+          subject: ❌ Tests Failed – ${{ github.repository }}
+          body: |
+            ❌ Unit tests failed.
+            Repo: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+
+      # SonarQube Scan
+      - name: SonarQube Scan
+        if: success()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=java-github-project \
+            -Dsonar.host.url=${SONAR_HOST_URL} \
+            -Dsonar.login=${SONAR_TOKEN}
+
+      # Install jq
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # Quality Gate Check
+      - name: Check SonarQube Quality Gate
+        id: qualitygate
+        run: |
+          STATUS=$(curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+            "${{ secrets.SONAR_HOST_URL }}/api/qualitygates/project_status?projectKey=java-github-project" \
+            | jq -r '.projectStatus.status')
+
+          echo "Quality Gate Status: $STATUS"
+          if [ "$STATUS" != "OK" ]; then
+            exit 1
+          fi
+
+      # Email if quality gate fails
+      - name: Email on SonarQube Failure
+        if: always() && steps.qualitygate.outcome == 'failure'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.ALERT_EMAIL_FROM }}
+          to: ${{ secrets.ALERT_EMAIL_TO }}
+          subject: ❌ SonarQube Quality Gate Failed
+          body: |
+            ❌ Code coverage below threshold.
+            Repo: ${{ github.repository }}
+
+      # Auto PR (only if everything passed)
+      - name: Create Pull Request
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
+          branch: ci/pr-${{ github.run_id }}
+          title: "Auto PR: CI Passed ✅"
+          body: |
+            ✅ Build passed
+            ✅ Tests passed
+            ✅ SonarQube Quality Gate passed
+
+            Please review and approve.
+          delete-branch: true
